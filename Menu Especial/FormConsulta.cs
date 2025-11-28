@@ -7,7 +7,7 @@ using System.IO;
 using System.Text;
 using System.Windows.Forms;
 using System.Xml;
-using Newtonsoft.Json; // usamos JsonConvert y Newtonsoft.Json.Formatting
+using Newtonsoft.Json;
 
 namespace Menu_Especial
 {
@@ -23,17 +23,35 @@ namespace Menu_Especial
         {
             InitializeComponent();
 
-            // Aseguramos que los handlers estén conectados (si el Designer no los conectó)
-            this.Load += FormConsulta_Load;
-
+            // Evitamos suscripciones duplicadas: removemos (si existen) y volvemos a agregar una sola vez.
+            btnGuardar.Click -= btnGuardar_Click;
             btnGuardar.Click += btnGuardar_Click;
+
+            btnCancelar.Click -= btnCancelar_Click;
             btnCancelar.Click += btnCancelar_Click;
+
+            btnBuscar.Click -= btnBuscar_Click;
             btnBuscar.Click += btnBuscar_Click;
-            button1.Click += btnCancelarBusqueda_Click; // button1 es "Cancelar" del buscador
+
+            button1.Click -= btnCancelarBusqueda_Click;
+            button1.Click += btnCancelarBusqueda_Click;
+
+            btnModificar.Click -= btnModificar_Click;
             btnModificar.Click += btnModificar_Click;
+
+            dataGridView1.CellClick -= dataGridView1_CellClick;
             dataGridView1.CellClick += dataGridView1_CellClick;
 
-            
+            // Exportar: si existe el control, suscribimos igual evitando duplicados
+            if (btnExportar != null)
+            {
+                btnExportar.Click -= btnExportar_Click;
+                btnExportar.Click += btnExportar_Click;
+            }
+
+            // El Load puede estar conectado en el Designer; no hace daño repetir de la misma manera
+            this.Load -= FormConsulta_Load;
+            this.Load += FormConsulta_Load;
         }
 
         private void FormConsulta_Load(object sender, EventArgs e)
@@ -145,6 +163,10 @@ namespace Menu_Especial
                     DataTable dt = new DataTable();
                     da.Fill(dt);
 
+                    // Guardamos la fila actualmente seleccionada para re-seleccionarla si podemos
+                    int currentRowIndex = -1;
+                    if (dataGridView1.CurrentRow != null) currentRowIndex = dataGridView1.CurrentRow.Index;
+
                     dataGridView1.DataSource = dt;
 
                     // ocultar idConsulta al usuario
@@ -152,6 +174,10 @@ namespace Menu_Especial
                         dataGridView1.Columns["idConsulta"].Visible = false;
 
                     dataGridView1.AutoResizeColumns();
+
+                    // Intentamos re-seleccionar la fila previa si existe
+                    if (currentRowIndex >= 0 && currentRowIndex < dataGridView1.Rows.Count)
+                        dataGridView1.CurrentCell = dataGridView1.Rows[currentRowIndex].Cells[1];
                 }
             }
             catch (Exception ex)
@@ -198,13 +224,30 @@ namespace Menu_Especial
                         cmd.Parameters.AddWithValue("@Diagnostico", diagnostico);
                         cmd.Parameters.AddWithValue("@Procedimiento", procedimiento);
 
-                        cmd.ExecuteNonQuery();
+                        int filas = cmd.ExecuteNonQuery();
+                        if (filas <= 0)
+                        {
+                            MessageBox.Show("No se insertó la consulta (filas afectadas = 0).", "Aviso", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            return;
+                        }
                     }
                 }
 
+                // Mensaje y refresco seguro
                 MessageBox.Show("Consulta guardada correctamente.", "Éxito", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 LimpiarCampos();
-                CargarConsultas();
+
+                // Desconectamos temporalmente el CellClick para evitar lecturas mientras recargamos
+                dataGridView1.CellClick -= dataGridView1_CellClick;
+                try
+                {
+                    CargarConsultas();
+                    idConsultaSeleccionada = -1;
+                }
+                finally
+                {
+                    dataGridView1.CellClick += dataGridView1_CellClick;
+                }
             }
             catch (Exception ex)
             {
@@ -213,40 +256,84 @@ namespace Menu_Especial
         }
 
         // -------------------------
-        // SELECCIONAR CONSULTA DESDE EL GRID
+        // SELECCIONAR CONSULTA DESDE EL GRID (robusto)
         // -------------------------
         private void dataGridView1_CellClick(object sender, DataGridViewCellEventArgs e)
         {
-            if (e.RowIndex < 0) return;
+            // protección por índice
+            if (e.RowIndex < 0 || e.RowIndex >= dataGridView1.Rows.Count)
+            {
+                idConsultaSeleccionada = -1;
+                return;
+            }
 
             DataGridViewRow fila = dataGridView1.Rows[e.RowIndex];
 
-            // Intentamos obtener idConsulta de forma segura
+            // Intentar leer idConsulta de manera segura (evitar DBNull)
             try
             {
+                object valId = null;
                 if (dataGridView1.Columns.Contains("idConsulta"))
-                    idConsultaSeleccionada = Convert.ToInt32(fila.Cells["idConsulta"].Value);
+                    valId = fila.Cells["idConsulta"].Value;
+                else if (fila.Cells.Count > 0)
+                    valId = fila.Cells[0].Value;
+
+                if (valId == null || valId == DBNull.Value || string.IsNullOrWhiteSpace(valId.ToString()))
+                {
+                    idConsultaSeleccionada = -1;
+                }
                 else
-                    idConsultaSeleccionada = Convert.ToInt32(fila.Cells[0].Value);
+                {
+                    if (!int.TryParse(valId.ToString(), out idConsultaSeleccionada))
+                        idConsultaSeleccionada = -1;
+                }
             }
             catch
             {
                 idConsultaSeleccionada = -1;
             }
 
-            // Rellenar campos (con protecciones por null)
-            try { comboPaciente.Text = fila.Cells["Paciente"].Value?.ToString() ?? ""; } catch { }
-            try { comboPersonal.Text = fila.Cells["Personal"].Value?.ToString() ?? ""; } catch { }
-            try { dateFechaConsulta.Value = Convert.ToDateTime(fila.Cells["FechaConsulta"].Value); } catch { dateFechaConsulta.Value = DateTime.Today; }
-            try { txtDiagnostico.Text = fila.Cells["Diagnostico"].Value?.ToString() ?? ""; } catch { txtDiagnostico.Clear(); }
-            try { txtProcedimiento.Text = fila.Cells["Procedimiento"].Value?.ToString() ?? ""; } catch { txtProcedimiento.Clear(); }
+            // Rellenar campos con protecciones por null/DBNull
+            try { comboPaciente.Text = fila.Cells["Paciente"]?.Value?.ToString() ?? ""; } catch { comboPaciente.Text = ""; }
+            try { comboPersonal.Text = fila.Cells["Personal"]?.Value?.ToString() ?? ""; } catch { comboPersonal.Text = ""; }
+            try
+            {
+                var v = fila.Cells["FechaConsulta"]?.Value;
+                if (v != null && v != DBNull.Value && DateTime.TryParse(v.ToString(), out DateTime d))
+                    dateFechaConsulta.Value = d;
+                else
+                    dateFechaConsulta.Value = DateTime.Today;
+            }
+            catch { dateFechaConsulta.Value = DateTime.Today; }
+
+            try { txtDiagnostico.Text = fila.Cells["Diagnostico"]?.Value?.ToString() ?? ""; } catch { txtDiagnostico.Clear(); }
+            try { txtProcedimiento.Text = fila.Cells["Procedimiento"]?.Value?.ToString() ?? ""; } catch { txtProcedimiento.Clear(); }
         }
 
         // -------------------------
-        // MODIFICAR CONSULTA
+        // MODIFICAR CONSULTA (ahora con fallback a la fila seleccionada)
         // -------------------------
         private void btnModificar_Click(object sender, EventArgs e)
         {
+            // Si no tenemos id, intentamos obtenerlo desde la fila seleccionada actual
+            if (idConsultaSeleccionada == -1)
+            {
+                if (dataGridView1.CurrentRow != null)
+                {
+                    var row = dataGridView1.CurrentRow;
+                    object valId = null;
+                    if (dataGridView1.Columns.Contains("idConsulta"))
+                        valId = row.Cells["idConsulta"].Value;
+                    else if (row.Cells.Count > 0)
+                        valId = row.Cells[0].Value;
+
+                    if (valId != null && valId != DBNull.Value && int.TryParse(valId.ToString(), out int parsed))
+                    {
+                        idConsultaSeleccionada = parsed;
+                    }
+                }
+            }
+
             if (idConsultaSeleccionada == -1)
             {
                 MessageBox.Show("Debe seleccionar una consulta del listado.", "Aviso", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -280,21 +367,35 @@ namespace Menu_Especial
                     using (SqlCommand cmd = new SqlCommand(query, con))
                     {
                         cmd.Parameters.AddWithValue("@idConsulta", idConsultaSeleccionada);
-                        cmd.Parameters.AddWithValue("@idPaciente", comboPaciente.SelectedValue);
-                        cmd.Parameters.AddWithValue("@idPersonal", comboPersonal.SelectedValue);
+                        cmd.Parameters.AddWithValue("@idPaciente", Convert.ToInt32(comboPaciente.SelectedValue));
+                        cmd.Parameters.AddWithValue("@idPersonal", Convert.ToInt32(comboPersonal.SelectedValue));
                         cmd.Parameters.AddWithValue("@Fecha", dateFechaConsulta.Value.Date);
                         cmd.Parameters.AddWithValue("@Diagnostico", txtDiagnostico.Text.Trim());
                         cmd.Parameters.AddWithValue("@Procedimiento", txtProcedimiento.Text.Trim());
 
-                        cmd.ExecuteNonQuery();
+                        int filas = cmd.ExecuteNonQuery();
+                        if (filas <= 0)
+                        {
+                            MessageBox.Show("No se modificó la consulta (filas afectadas = 0).", "Aviso", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            return;
+                        }
                     }
                 }
 
                 MessageBox.Show("Consulta modificada correctamente.", "Éxito", MessageBoxButtons.OK, MessageBoxIcon.Information);
 
                 LimpiarCampos();
-                CargarConsultas();
-                idConsultaSeleccionada = -1;
+                // Desconectamos el handler para evitar lecturas en crudo mientras recargamos
+                dataGridView1.CellClick -= dataGridView1_CellClick;
+                try
+                {
+                    CargarConsultas();
+                    idConsultaSeleccionada = -1;
+                }
+                finally
+                {
+                    dataGridView1.CellClick += dataGridView1_CellClick;
+                }
             }
             catch (Exception ex)
             {
@@ -341,7 +442,7 @@ namespace Menu_Especial
         // Handlers vacíos (si el designer los conectó)
         private void txtBuscar_TextChanged(object sender, EventArgs e)
         {
-            // Si quieres búsqueda en tiempo real, descomenta la siguiente línea:
+            // Si quieres búsqueda en tiempo real, descomenta:
             // CargarConsultas(txtBuscar.Text.Trim());
         }
 
@@ -493,7 +594,7 @@ namespace Menu_Especial
             foreach (DataGridViewColumn col in dataGridView1.Columns)
             {
                 if (col.Visible)
-                    sb.Append("<th>" + System.Net.WebUtility.HtmlEncode(col.HeaderText) + "</th>");
+                    sb.Append("<th>" + System.Net.WebUtility.HtmlEncode(col.HeaderText) + "</th");
             }
             sb.Append("</tr>");
 
